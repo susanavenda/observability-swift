@@ -1,0 +1,3 @@
+
+
+{"attributes":{"description":"Sample log overview dashboard","hits":0,"kibanaSavedObjectMeta":{"searchSourceJSON":"{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[]}"},"optionsJSON":"{\"darkTheme\":false}","panelsJSON":"[]","timeRestore":false,"title":"Sample Observability Dashboard","version":1},"id":"sample-observability-dashboard","references":[],"type":"dashboard","updated_at":"2024-07-07T00:00:00.000Z","version":"1"}
