@@ -1,0 +1,798 @@
+version: '3.7'
+services:
+
+  # Confluent kafka stack
+  zk-1:
+    image: confluentinc/cp-zookeeper:${CONFLUENT_VERSION}
+    hostname: zk-1
+    container_name: zk-1
+    restart: on-failure
+    networks:
+      - elastic
+    environment:
+      - ZOOKEEPER_CLIENT_PORT=2181
+      - ZOOKEEPER_TICK_TIME=2000
+      - KAFKA_OPTS=-Xms128m -Xmx128m -Dzookeeper.4lw.commands.whitelist=stat,ruok,conf,isro
+    healthcheck:
+      test: test `echo "ruok" | nc localhost 2181 | grep "imok"`
+      interval: 2s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
+
+  create-admin-user:
+    image: confluentinc/cp-kafka:${CONFLUENT_VERSION}
+    depends_on:
+      - zk-1
+    entrypoint: "kafka-configs --zookeeper zk-1:2181 --alter --add-config SCRAM-SHA-512='[password=admin-secret]' --entity-type users --entity-name admin"
+    restart: on-failure
+    networks:
+      - elastic
+
+  kafka-1:
+    image: confluentinc/cp-kafka:${CONFLUENT_VERSION}
+    hostname: kafka-1
+    container_name: kafka-1
+    restart: on-failure
+    networks:
+      - elastic
+    depends_on:
+      - zk-1
+    volumes:
+      - data-kafka-1:/var/lib/kafka/data
+    environment:
+      - KAFKA_BROKER_ID=101
+      - KAFKA_ZOOKEEPER_CONNECT=zk-1:2181
+      - KAFKA_ADVERTISED_LISTENERS=SECURE://kafka-1:9092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=SECURE:SASL_PLAINTEXT
+      - KAFKA_LISTENERS=SECURE://:9092
+      - KAFKA_SASL_ENABLED_MECHANISMS=SCRAM-SHA-512
+      - KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL=SCRAM-SHA-512
+      - KAFKA_INTER_BROKER_LISTENER_NAME=SECURE
+      - KAFKA_LISTENER_NAME_SECURE_SCRAM___SHA___512_SASL_JAAS_CONFIG=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;
+      - KAFKA_AUTO_CREATE_TOPIC_ENABLE=true
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_CONFLUENT_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_OPTS=-Xms256m -Xmx256m
+      - KAFKA_AUTHORIZER_CLASS_NAME=kafka.security.authorizer.AclAuthorizer
+      - KAFKA_SUPER_USERS=User:admin
+    healthcheck:
+      test: nc -z localhost 9092
+      interval: 2s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
+
+
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:${CONFLUENT_VERSION}
+    hostname: kafka-connect
+    ports:
+      - 8083:8083
+    networks:
+      - elastic
+    depends_on:
+      - kafka-1
+    healthcheck:
+      test: test `curl -s -o /dev/null -w "%{http_code}" http://localhost:8083/connectors` = 200
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
+    environment:
+      - KAFKA_OPTS=-javaagent:/opentelemetry-javaagent-all.jar -Xms512m -Xmx512m -Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=connect,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+      - CONNECT_BOOTSTRAP_SERVERS=kafka-1:9092
+      - CONNECT_REST_ADVERTISED_HOST_NAME=kafka-connect
+      - CONNECT_REST_PORT=8083
+      - CONNECT_GROUP_ID=connect
+      - CONNECT_CONFIG_STORAGE_TOPIC=_connect_config
+      - CONNECT_OFFSET_STORAGE_TOPIC=_connect_offset
+      - CONNECT_STATUS_STORAGE_TOPIC=_connect_status
+      - CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR=1
+      - CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR=1
+      - CONNECT_STATUS_STORAGE_REPLICATION_FACTOR=1
+      - CONNECT_CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY=All
+      - CONNECT_SECURITY_PROTOCOL=SASL_PLAINTEXT
+      - CONNECT_SASL_MECHANISM=SCRAM-SHA-512
+      - CONNECT_SASL_JAAS_CONFIG=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;
+      - CONNECT_CONSUMER_SASL_MECHANISM=SCRAM-SHA-512
+      - CONNECT_PRODUCER_SASL_MECHANISM=SCRAM-SHA-512
+      - CONNECT_CONSUMER_SECURITY_PROTOCOL=SASL_PLAINTEXT
+      - CONNECT_PRODUCER_SECURITY_PROTOCOL=SASL_PLAINTEXT
+      - CONNECT_KEY_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - CONNECT_VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE=false
+      - CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE=false
+      - CONNECT_INTERNAL_KEY_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - CONNECT_INTERNAL_VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - CONNECT_PLUGIN_PATH=/confluent-${CONFLUENT_VERSION}/share/java,/plugin_connect
+      - CONNECT_LOG4J_ROOT_LOGLEVEL=INFO
+      - CONNECT_LOG4J_LOGGERS=org.reflections=ERROR
+    restart: on-failure
+    volumes:
+      - ./plugin_connect:/plugin_connect:ro
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+      - data-connector:/result/
+
+
+  ksql:
+    image: confluentinc/ksqldb-server:${KSQLDB_VERSION}
+    restart: always
+    hostname: ksql
+    container_name: ksql
+    ports:
+      - "8088:8088"
+    networks:
+      - elastic
+    environment:
+      - KSQL_OPTS=-javaagent:/opentelemetry-javaagent-all.jar -Xms512m -Xmx512m -Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=ksql,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+      - KSQL_BOOTSTRAP_SERVERS=kafka-1:9092
+      - KSQL_SECURITY_PROTOCOL=SASL_PLAINTEXT
+      - KSQL_SASL_MECHANISM=SCRAM-SHA-512
+      - "KSQL_SASL_JAAS_CONFIG=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;"
+      - KSQL_LISTENERS=http://0.0.0.0:8088
+      - KSQL_KSQL_STREAMS_REPLICATION_FACTOR=1
+      - KSQL_KSQL_INTERNAL_TOPIC_REPLICAS=1
+      - KSQL_KSQL_SINK_REPLICAS=1
+      - KSQL_KSQL_QUERIES_FILE=/ksql.txt
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+      - ./data/ksql.txt:/ksql.txt:ro
+    depends_on:
+      - kafka-1
+
+  akhq:
+    image: tchiotludo/akhq:${AKHQ_VERSION}
+    environment:
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=akhq,service.version=1.1,deployment.environment=production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${EXPORTER}"
+      JAVA_OPTS: "-javaagent:/opentelemetry-javaagent-all.jar -Xms256m -Xmx256m -Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true"
+      AKHQ_CONFIGURATION: |
+        micronaut:
+         server:
+           cors:
+             enabled: true
+        akhq:
+          connections:
+            docker-kafka-server:
+              properties:
+                bootstrap.servers: "kafka-1:9092"
+                security.protocol: SASL_PLAINTEXT
+                sasl.mechanism: SCRAM-SHA-512
+                sasl.jaas.config: org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="admin-secret";
+              connect:
+                - name: connect
+                  url: "http://kafka-connect:8083"
+              ksqldb:
+                - name: ksqldb
+                  url: http://ksql:8088
+    ports:
+      - 8080:8080
+    networks:
+      - elastic
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+
+
+  # Elastic stack
+  apm-server-secure:
+    image: docker.elastic.co/apm/apm-server:${ELASTICSEARCH_VERSION}
+    depends_on:
+      - elasticsearch
+      - kibana
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
+    cap_drop: ["ALL"]
+    ports:
+      - 8200:8200
+    networks:
+      - elastic
+    command: >
+      apm-server -e
+        -E apm-server.rum.enabled=true
+        -E setup.kibana.host=kibana:5601
+        -E setup.template.settings.index.number_of_replicas=0
+        -E apm-server.kibana.enabled=true
+        -E apm-server.kibana.host=kibana:5601
+        -E output.elasticsearch.hosts=["elasticsearch:9200"]
+        -E apm-server.auth.anonymous.rate_limit.event_limit=300
+        -E apm-server.auth.anonymous.rate_limit.ip_limit=1000
+        -E apm-server.auth.anonymous.allow_service=angular-app
+
+    healthcheck:
+      interval: 10s
+      retries: 12
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:8200/
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTICSEARCH_VERSION}
+    environment:
+      - bootstrap.memory_lock=true
+      - cluster.name=docker-cluster
+      - cluster.routing.allocation.disk.threshold_enabled=false
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-XX:UseAVX=2 -Xms1g -Xmx1g
+    ulimits:
+      memlock:
+        hard: -1
+        soft: -1
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports:
+      - 9200:9200
+    networks:
+      - elastic
+    healthcheck:
+      interval: 20s
+      retries: 10
+      test: curl -s http://localhost:9200/_cluster/health | grep -vq '"status":"red"'
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTICSEARCH_VERSION}
+    depends_on:
+      - elasticsearch
+    environment:
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - 5601:5601
+    networks:
+      - elastic
+    healthcheck:
+      interval: 10s
+      retries: 20
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:5601/api/status
+
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELASTICSEARCH_VERSION}
+    user: root
+    networks:
+      - elastic
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/containers/:/var/lib/docker/containers/:ro
+      - ./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+    environment:
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - KIBANA_HOST=kibana
+    command: ["--strict.perms=false"]
+    restart: on-failure
+
+  metricbeat:
+    image: docker.elastic.co/beats/metricbeat:${ELASTICSEARCH_VERSION}
+    user: root
+    networks:
+      - elastic
+    volumes:
+      - /proc:/hostfs/proc:ro
+      - /sys/fs/cgroup:/hostfs/sys/fs/cgroup:ro
+      - /:/hostfs:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml:ro
+    environment:
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - KIBANA_HOST=kibana
+    command: ["--strict.perms=false", "-system.hostfs=/hostfs"]
+    restart: on-failure
+
+  # OTEL
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${OTEL_VERSION}
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    restart: on-failure
+    volumes:
+      - ./config/otel_collector.yml:/etc/otel-collector-config.yaml
+    ports:
+      - "4317"        # OTLP gRPC receiver
+      - "8889:8889"   # Prometheus
+    depends_on:
+      - kafka-1
+    networks:
+      - elastic
+
+  otel-ingester:
+    image: otel/opentelemetry-collector-contrib:${OTEL_VERSION}
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    restart: on-failure
+    volumes:
+      - ./config/otel_ingester.yml:/etc/otel-collector-config.yaml
+    depends_on:
+      - kafka-1
+      - elasticsearch
+    networks:
+      - elastic
+
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION}
+    volumes:
+      - ./config/prometheus.yml:/prometheus.yml:ro
+    command:
+      - '--config.file=/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: on-failure
+    ports:
+      - "9090:9090"
+    networks:
+      - elastic
+
+  # Load data
+  load-data-p1:
+    image: "ianitrix/kafka:${IANITRIX_VERSION}"
+    networks:
+      - elastic
+    depends_on:
+      - kafka-1
+    environment:
+      KAFKA_OPTS: "-javaagent:/opentelemetry-javaagent-all.jar -Xms256m -Xmx256m -Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=producer1,service.version=1.1,deployment.environment=production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${EXPORTER}"
+    entrypoint: "kafka-producer-perf-test --topic test1 --num-records 1000000 --throughput ${THROUGHPUT} --record-size 100 --producer.config /kafka.config"
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+      - ./config/kafka.config:/kafka.config:ro
+    restart: on-failure
+
+  load-data-p2:
+    image: "ianitrix/kafka:${IANITRIX_VERSION}"
+    networks:
+      - elastic
+    depends_on:
+      - kafka-1
+    environment:
+      KAFKA_OPTS: "-javaagent:/opentelemetry-javaagent-all.jar -Xms256m -Xmx256m -Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=producer2,service.version=1.1,deployment.environment=production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${EXPORTER}"
+    entrypoint: "kafka-producer-perf-test --topic test2 --num-records 1000000 --throughput ${THROUGHPUT} --record-size 100 --producer.config /kafka.config --producer-props client.id=producer2"
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+      - ./config/kafka.config:/kafka.config:ro
+    restart: on-failure
+
+  load-data-p3:
+    image: "ianitrix/kafka:${IANITRIX_VERSION}"
+    networks:
+      - elastic
+    depends_on:
+      - kafka-1
+    environment:
+      KAFKA_OPTS: "-javaagent:/opentelemetry-javaagent-all.jar -Xms256m -Xmx256m -Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=producer3,service.version=1.1,deployment.environment=production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${EXPORTER}"
+    entrypoint: "kafka-producer-perf-test --topic test3 --num-records 1000000 --throughput ${THROUGHPUT} --record-size 100 --producer.config /kafka.config --producer-props client.id=producer3"
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+      - ./config/kafka.config:/kafka.config:ro
+    restart: on-failure
+
+  load-data-p4:
+    image: "ianitrix/kafka:${IANITRIX_VERSION}"
+    networks:
+      - elastic
+    depends_on:
+      - kafka-1
+    environment:
+      KAFKA_OPTS: "-javaagent:/opentelemetry-javaagent-all.jar -Xms256m -Xmx256m -Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=producer4,service.version=1.1,deployment.environment=production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${EXPORTER}"
+    entrypoint: "kafka-producer-perf-test --topic test4 --num-records 1000000 --throughput ${THROUGHPUT} --record-size 100 --producer.config /kafka.config --producer-props client.id=producer4"
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+      - ./config/kafka.config:/kafka.config:ro
+    restart: on-failure
+
+
+  consume-data-c1:
+    image: "ianitrix/kafka:${IANITRIX_VERSION}"
+    networks:
+      - elastic
+    depends_on:
+      - kafka-1
+    environment:
+      KAFKA_OPTS: "-javaagent:/opentelemetry-javaagent-all.jar -Xms256m -Xmx256m -Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=consumer1,service.version=1.1,deployment.environment=production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${EXPORTER}"
+    entrypoint: "kafka-console-consumer --topic test1 --from-beginning  --bootstrap-server kafka-1:9092 --consumer.config /kafka.config --consumer-property client.id=myConsumer1 --group=myGroup1"
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+      - ./config/kafka.config:/kafka.config:ro
+    restart: on-failure
+
+  consume-data-c2:
+    image: "ianitrix/kafka:${IANITRIX_VERSION}"
+    networks:
+      - elastic
+    depends_on:
+      - kafka-1
+    environment:
+      KAFKA_OPTS: "-javaagent:/opentelemetry-javaagent-all.jar -Xms256m -Xmx256m -Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=consumer2,service.version=1.1,deployment.environment=production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${EXPORTER}"
+    entrypoint: "kafka-console-consumer --topic test1 --from-beginning --bootstrap-server kafka-1:9092 --consumer.config /kafka.config --consumer-property client.id=myConsumer2 --group=myGroup2"
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+      - ./config/kafka.config:/kafka.config:ro
+    restart: on-failure
+
+  load-es-connector-trace:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/deployConnector.sh"
+      - "http://kafka-connect:8083"
+      - ""
+      - "body.json"
+    depends_on:
+      - kafka-connect
+      - elasticsearch
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/deployConnector.sh:/deployConnector.sh:ro
+      - ./data/connectorTrace.json:/body.json:ro
+
+  load-es-connector-trace2:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/deployConnector.sh"
+      - "http://kafka-connect:8083"
+      - ""
+      - "body.json"
+    depends_on:
+      - kafka-connect
+      - elasticsearch
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/deployConnector.sh:/deployConnector.sh:ro
+      - ./data/connectorTrace2.json:/body.json:ro
+
+  load-es-connector-trace3:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/deployConnector.sh"
+      - "http://kafka-connect:8083"
+      - ""
+      - "body.json"
+    depends_on:
+      - kafka-connect
+      - elasticsearch
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/deployConnector.sh:/deployConnector.sh:ro
+      - ./data/connectorTrace3.json:/body.json:ro
+
+  load-es-connector-aggDoc-doc:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/deployConnector.sh"
+      - "http://kafka-connect:8083"
+      - ""
+      - "body.json"
+    depends_on:
+      - kafka-connect
+      - elasticsearch
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/deployConnector.sh:/deployConnector.sh:ro
+      - ./data/connectorTraceAggDoc.json:/body.json:ro
+
+  load-es-connector-joinDoc-doc:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/deployConnector.sh"
+      - "http://kafka-connect:8083"
+      - ""
+      - "body.json"
+    depends_on:
+      - kafka-connect
+      - elasticsearch
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/deployConnector.sh:/deployConnector.sh:ro
+      - ./data/connectorTraceJoinDoc.json:/body.json:ro
+
+  load-es-connector-agg-doc:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/deployConnector.sh"
+      - "http://kafka-connect:8083"
+      - ""
+      - "body.json"
+    depends_on:
+      - kafka-connect
+      - elasticsearch
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/deployConnector.sh:/deployConnector.sh:ro
+      - ./data/connectorTraceAgg.json:/body.json:ro
+
+  load-es-connector-transform-doc:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/deployConnector.sh"
+      - "http://kafka-connect:8083"
+      - ""
+      - "body.json"
+    depends_on:
+      - kafka-connect
+      - elasticsearch
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/deployConnector.sh:/deployConnector.sh:ro
+      - ./data/connectorTraceTransform.json:/body.json:ro
+
+  kstream-stateless-2-8:
+    image: ianitrix/kafka-apm-example:2.8
+    restart: always
+    hostname: kstream-stateless-2-8
+    container_name: kstream-stateless-2-8
+    networks:
+      - elastic
+    environment:
+      - KAFKATRACE_bootstrap_servers=kafka-1:9092
+      - KAFKATRACE_security_protocol=SASL_PLAINTEXT
+      - KAFKATRACE_sasl_mechanism=SCRAM-SHA-512
+      - "KAFKATRACE_sasl_jaas_config=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;"
+      - KAFKATRACE_mode=map
+      - KAFKATRACE_application_id=kstream-stateless-2-8
+      - JAVA_OPTION=-javaagent:/opentelemetry-javaagent-all.jar
+      - JAVA_HEAP=-Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=kstream-stateless-2-8,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+
+
+  kstream-stateless-2-5:
+    image: ianitrix/kafka-apm-example:2.5
+    restart: always
+    hostname: kstream-stateless-2-5
+    container_name: kstream-stateless-2-5
+    networks:
+      - elastic
+    environment:
+      - KAFKATRACE_bootstrap_servers=kafka-1:9092
+      - KAFKATRACE_security_protocol=SASL_PLAINTEXT
+      - KAFKATRACE_sasl_mechanism=SCRAM-SHA-512
+      - "KAFKATRACE_sasl_jaas_config=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;"
+      - KAFKATRACE_mode=map
+      - KAFKATRACE_application_id=kstream-stateless-2-5
+      - JAVA_OPTION=-javaagent:/opentelemetry-javaagent-all.jar
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=kstream-stateless-2-5,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+
+
+  kstream-statefull-join-2-8:
+    image: ianitrix/kafka-apm-example:2.8
+    restart: always
+    hostname: kstream-statefullJoin-2-8
+    container_name: kstream-statefullJoin-2-8
+    networks:
+      - elastic
+    environment:
+      - KAFKATRACE_bootstrap_servers=kafka-1:9092
+      - KAFKATRACE_security_protocol=SASL_PLAINTEXT
+      - KAFKATRACE_sasl_mechanism=SCRAM-SHA-512
+      - "KAFKATRACE_sasl_jaas_config=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;"
+      - KAFKATRACE_mode=join
+      - KAFKATRACE_application_id=kstream-statefullJoin-2-8
+      - JAVA_OPTION=-javaagent:/opentelemetry-javaagent-all.jar
+      - JAVA_HEAP=-Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=kstream-statefullJoin-2-8,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+
+
+  kstream-statefull-join-2-5:
+    image: ianitrix/kafka-apm-example:2.5
+    restart: always
+    hostname: kstream-statefullJoin-2-5
+    container_name: kstream-statefullJoin-2-5
+    networks:
+      - elastic
+    environment:
+      - KAFKATRACE_bootstrap_servers=kafka-1:9092
+      - KAFKATRACE_security_protocol=SASL_PLAINTEXT
+      - KAFKATRACE_sasl_mechanism=SCRAM-SHA-512
+      - "KAFKATRACE_sasl_jaas_config=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;"
+      - KAFKATRACE_mode=join
+      - KAFKATRACE_application_id=kstream-statefullJoin-2-5
+      - JAVA_OPTION=-javaagent:/opentelemetry-javaagent-all.jar
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=kstream-statefullJoin-2-5,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+
+  kstream-statefull-transform-2-8:
+    image: ianitrix/kafka-apm-example:2.8
+    restart: always
+    hostname: kstream-statefullTransform-2-8
+    container_name: kstream-statefullTransform-2-8
+    networks:
+      - elastic
+    environment:
+      - KAFKATRACE_bootstrap_servers=kafka-1:9092
+      - KAFKATRACE_security_protocol=SASL_PLAINTEXT
+      - KAFKATRACE_sasl_mechanism=SCRAM-SHA-512
+      - "KAFKATRACE_sasl_jaas_config=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;"
+      - KAFKATRACE_mode=transform
+      - KAFKATRACE_application_id=kstream-statefullTransform-2-8
+      - JAVA_OPTION=-javaagent:/opentelemetry-javaagent-all.jar
+      - JAVA_HEAP=-Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=kstream-statefullTransform-2-8,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+
+  kstream-statefull-aggregation-2-8:
+    image: ianitrix/kafka-apm-example:2.8
+    restart: always
+    hostname: kstream-statefullAggregation-2-8
+    container_name: kstream-statefullAggregation-2-8
+    networks:
+      - elastic
+    environment:
+      - KAFKATRACE_bootstrap_servers=kafka-1:9092
+      - KAFKATRACE_security_protocol=SASL_PLAINTEXT
+      - KAFKATRACE_sasl_mechanism=SCRAM-SHA-512
+      - "KAFKATRACE_sasl_jaas_config=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;"
+      - KAFKATRACE_mode=agg
+      - KAFKATRACE_application_id=kstream-statefullAggregation-2-8
+      - JAVA_OPTION=-javaagent:/opentelemetry-javaagent-all.jar
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=kstream-statefullAggregation-2-8,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+
+  kstream-billing-join-2-8:
+    image: ianitrix/kafka-apm-example:2.8
+    restart: always
+    hostname: kstream-billing-join-2-8
+    container_name: kstream-billing-join-2-8
+    networks:
+      - elastic
+    environment:
+      - KAFKATRACE_bootstrap_servers=kafka-1:9092
+      - KAFKATRACE_security_protocol=SASL_PLAINTEXT
+      - KAFKATRACE_sasl_mechanism=SCRAM-SHA-512
+      - "KAFKATRACE_sasl_jaas_config=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;"
+      - KAFKATRACE_mode=joinBill
+      - KAFKATRACE_application_id=kstream-billing-join-2-8
+      - JAVA_OPTION=-javaagent:/opentelemetry-javaagent-all.jar
+      - JAVA_HEAP=-Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=kstream-billing-join-2-8,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+
+  kstream-billing-agg-2-8:
+    image: ianitrix/kafka-apm-example:2.8
+    restart: always
+    hostname: kstream-billing-agg-2-8
+    container_name: kstream-billing-agg-2-8
+    networks:
+      - elastic
+    environment:
+      - KAFKATRACE_bootstrap_servers=kafka-1:9092
+      - KAFKATRACE_security_protocol=SASL_PLAINTEXT
+      - KAFKATRACE_sasl_mechanism=SCRAM-SHA-512
+      - "KAFKATRACE_sasl_jaas_config=org.apache.kafka.common.security.scram.ScramLoginModule required username=admin password=admin-secret;"
+      - KAFKATRACE_mode=aggBill
+      - KAFKATRACE_application_id=kstream-billing-agg-2-8
+      - JAVA_OPTION=-javaagent:/opentelemetry-javaagent-all.jar
+      - JAVA_HEAP=-Dotel.instrumentation.common.experimental.suppress-messaging-receive-spans=true
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=kstream-billing-agg-2-8,service.version=1.1,deployment.environment=production
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${EXPORTER}
+    volumes:
+      - ./opentelemetry-javaagent-all.jar:/opentelemetry-javaagent-all.jar:ro
+
+  front:
+    image: ianitrix/kafka-apm-example-front:latest
+    restart: always
+    hostname: front
+    container_name: front
+    networks:
+      - elastic
+    ports:
+      - "4200:4200"
+    healthcheck:
+      interval: 10s
+      retries: 20
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:4200
+
+  deploy-sourcemap-main:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/uploadSourceMap.sh"
+    environment:
+      - APM=http://apm-server-secure:8200
+      - FRONT=http://front:4200
+      - FILE=main.ca2be0a261ec09fb9760.js
+    depends_on:
+      - apm-server-secure
+      - front
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/uploadSourceMap.sh:/uploadSourceMap.sh:ro
+
+  deploy-sourcemap-polyfills:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/uploadSourceMap.sh"
+    environment:
+      - APM=http://apm-server-secure:8200
+      - FRONT=http://front:4200
+      - FILE=polyfills.a6d94ff5c7441bee20f9.js
+    depends_on:
+      - apm-server-secure
+      - front
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/uploadSourceMap.sh:/uploadSourceMap.sh:ro
+
+  load-kibana-dashboard:
+    image: "curlimages/curl:7.69.0"
+    hostname: curl
+    entrypoint:
+      - "/deployDashboard.sh"
+      - "http://kibana:5601"
+      - "/kibana.ndjson"
+    depends_on:
+      - kibana
+    networks:
+      - elastic
+    restart: on-failure
+    volumes:
+      - ./script/deployDashboard.sh:/deployDashboard.sh:ro
+      - ./data/kibana.ndjson:/kibana.ndjson:ro
+
+volumes:
+  esdata:
+    driver: local
+  data-zk-log-1:
+  data-zk-data-1:
+  data-kafka-1:
+  data-connector:
+
+
+
+networks:
+  elastic:
+    driver: bridge

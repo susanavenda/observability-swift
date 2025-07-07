@@ -1,0 +1,9 @@
+---
+- name: Apply RHEL patching and monitoring configuration
+  hosts: all
+  become: true
+
+  roles:
+    - patch
+    - elastic_agent
+    - prometheus_node_exporter

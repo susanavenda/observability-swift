@@ -1,0 +1,27 @@
+receivers:
+  kafka:
+    brokers:
+      - kafka-1:9092
+    auth:
+      sasl:
+        username: admin
+        password: admin-secret
+        mechanism: SCRAM-SHA-512
+    topic: oltp_spans
+  
+exporters:
+  otlp/elastic:
+    endpoint: "http://apm-server-secure:8200"
+    tls:
+      insecure: true
+      
+processors:
+  batch:
+
+service:
+  pipelines:
+    traces:
+      receivers: [kafka]
+      processors: [batch]
+      exporters: ["otlp/elastic"]
+ 

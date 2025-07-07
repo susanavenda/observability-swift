@@ -1,0 +1,5 @@
+---
+dependencies:
+  - name: ansible.posix
+  - name: community.general
+  - name: geerlingguy.security
