@@ -9,7 +9,7 @@
 	<packaging>jar</packaging>
 
 	<name>kafka-apm-example</name>
-	<url>https://github.com/GuillaumeWaignier/kafka-apm-example</url>
+	<url>https://github.com/SusanaVenda/kafka-apm-example</url>
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -18,8 +18,8 @@
 		<!-- SonarCloud Configuration -->
 		<sonar.java.source>11</sonar.java.source>
 		<sonar.java.target>11</sonar.java.target>
-		<sonar.projectKey>GuillaumeWaignier_kafka-apm-example</sonar.projectKey>
-		<sonar.organization>guillaumewaignier-github</sonar.organization>
+		<sonar.projectKey>SusanaVenda_kafka-apm-example</sonar.projectKey>
+		<sonar.organization>SusanaVenda-github</sonar.organization>
 		<sonar.host.url>https://sonarcloud.io</sonar.host.url>
 		<sonar.coverage.jacoco.xmlReportPaths>${project.build.directory}/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
 
