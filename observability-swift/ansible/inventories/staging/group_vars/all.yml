@@ -1,0 +1,8 @@
+staging_common:
+  ssh_user: ec2-user
+  ssh_private_key_file: ~/.ssh/id_rsa
+  packages:
+    - vim
+    - git
+    - curl
+    - wget

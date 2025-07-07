@@ -1,0 +1,8 @@
+---
+roles:
+  - name: elastic.elasticsearch
+    version: 7.17.3
+  - name: elastic.beats
+    version: 7.17.3
+  - name: prometheus.prometheus
+    version: 0.14.0

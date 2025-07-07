@@ -1,9 +1,0 @@
-# ansible/playbook.yml
-- hosts: all
-  become: yes
-  roles:
-    - patch
-  tasks:
-    - name: Include patch role
-      include_role:
-        name: patch

@@ -1,0 +1,4 @@
+---
+patch_reboot_required: true
+patch_exclude_packages: []
+patch_security_only: true

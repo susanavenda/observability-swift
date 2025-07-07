@@ -1,0 +1,34 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+
+exporters:
+  kafka:
+    brokers:
+      - kafka-1:9092
+    auth:
+      sasl:
+        username: admin
+        password: admin-secret
+        mechanism: SCRAM-SHA-512
+    topic: oltp_spans
+
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: promexample
+
+processors:
+  batch:
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [kafka]
+    metrics:
+      receivers: [ otlp ]
+      processors: [ batch ]
+      exporters: [ prometheus ]
+ 

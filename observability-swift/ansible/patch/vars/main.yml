@@ -1,0 +1,5 @@
+---
+patch_reboot_required: true
+yum_cache_valid_time: 3600
+packages_to_update:
+  - "*"
