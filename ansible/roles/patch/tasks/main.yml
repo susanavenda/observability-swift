@@ -1,0 +1,20 @@
+# ansible/roles/patch/tasks/main.yml
+- name: Update all packages
+  yum:
+    name: '*'
+    state: latest
+
+- name: Clean up package cache
+  yum:
+    name: '*'
+    state: latest
+    update_cache: yes
+
+- name: Reboot if necessary
+  reboot:
+    msg: "Rebooting to complete patching"
+    connect_timeout: 5
+    reboot_timeout: 600
+    pre_reboot_delay: 0
+    post_reboot_delay: 60
+    test_command: whoami
